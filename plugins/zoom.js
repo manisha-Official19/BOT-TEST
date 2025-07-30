@@ -1,6 +1,9 @@
 const axios = require("axios");
-const { cmd } = require('../command')
+const { cmd } = require('../command');
 
+const zoomReplyMap = {}; // Tracks replies per user
+
+// Zoom.lk Search Command
 cmd({
   pattern: "zoom",
   react: "🔍",
@@ -10,62 +13,85 @@ cmd({
   filename: __filename
 }, async (conn, m, store, { from, args, reply }) => {
   try {
-    if (!args.length) return reply("Please provide a search term, e.g., zoom dragonkeeper");
+    if (!args.length) return reply("❗ Please provide a search term. Example: `zoom spiderman`");
 
     const searchText = encodeURIComponent(args.join(" "));
-    const searchapiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/search?text=${searchText}`;
+    const apiURL = `https://nethu-api-ashy.vercel.app/movie/zoom/search?text=${searchText}`;
+    const { data } = await axios.get(apiURL);
 
-    const searchResponse = await axios.get(searchapiUrl);
-    const result = searchResponse.data;
-
-    if (!result.status || !result.result.data.length) {
-      return reply("No results found for your search.");
+    if (!data.status || !data.result?.data?.length) {
+      return reply("❌ No results found for your search.");
     }
 
-    const movies = result.result.data;
+    const movies = data.result.data;
+    let msgText = `🎬 *Search Results for:* "${args.join(" ")}"\n\n`;
 
-    let message = `📽️ *Search results for:* ${args.join(" ")}\n\n`;
     movies.forEach((movie, i) => {
-      message += `*${i + 1}.* ${movie.title}\n`;
-      message += `${movie.desc.trim().slice(0, 100)}...\n`;  // snippet description
-      message += `[Link](${movie.link})\n\n`;
+      msgText += `*${i + 1}.* ${movie.title}\n`;
+      msgText += `${movie.desc.trim().slice(0, 100)}...\n`;
+      msgText += `🔗 ${movie.link}\n\n`;
     });
-    message += "Reply with the number to get the download link.";
 
-    await reply(message, null, { detectLinks: true });
+    msgText += `📩 *Reply to this message with the movie number (1–${movies.length}) to get the download link.*`;
 
-    // Wait for the user to reply with a number between 1 and movies.length
-    const filter = (response) => {
-      return response.sender === m.sender && /^[1-9]\d*$/.test(response.text) && Number(response.text) >= 1 && Number(response.text) <= movies.length;
+    const sent = await conn.sendMessage(from, { text: msgText }, { quoted: m });
+
+    // Save expected reply info
+    zoomReplyMap[m.sender] = {
+      stanzaId: sent.key.id,
+      movies,
+      timeout: setTimeout(() => {
+        delete zoomReplyMap[m.sender];
+      }, 60000) // 1-minute timeout
     };
 
-    // Wait for reply message from same user (adjust this based on your framework)
-    const collected = await conn.waitForReply(m.key.remoteJid, m.sender, filter, 30000);
-    if (!collected) return reply("Timeout: You didn't reply with a number in time.");
-
-    const selectedIndex = Number(collected.text) - 1;
-    const selectedMovie = movies[selectedIndex];
-    if (!selectedMovie) return reply("Invalid selection.");
-
-    // Fetch download info
-    const downloadUrlApi = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(selectedMovie.link)}`;
-
-    const downloadResponse = await axios.get(downloadUrlApi);
-    if (!downloadResponse.data.status) return reply("Download info not found.");
-
-    const dl = downloadResponse.data.result;
-
-    // Format download info message
-    let downloadMsg = `🎬 *${dl.title}*\n\n`;
-    downloadMsg += `📦 Size: ${dl.size}\n`;
-    downloadMsg += `👤 Author: ${dl.author}\n`;
-    downloadMsg += `👁️ Views: ${dl.view}\n`;
-    downloadMsg += `🔗 Download Link: ${dl.dl_link}\n`;
-
-    await reply(downloadMsg);
-
-  } catch (error) {
-    console.error(error);
-    reply("❌ Please try again later.");
+  } catch (err) {
+    console.error("Zoom Command Error:", err);
+    reply("❌ An error occurred. Please try again later.");
   }
 });
+
+// Message Reply Handler
+cmd.onMessage = async (conn, msg) => {
+  try {
+    if (!msg || msg.key.fromMe || !msg.message) return;
+
+    const sender = msg.key.participant || msg.key.remoteJid;
+    const replyText = msg.message?.conversation || msg.message?.extendedTextMessage?.text;
+    const replyInfo = msg.message?.extendedTextMessage?.contextInfo;
+
+    if (!replyInfo || !replyText || !zoomReplyMap[sender]) return;
+
+    const expected = zoomReplyMap[sender];
+    if (replyInfo.stanzaId !== expected.stanzaId) return;
+
+    const number = parseInt(replyText.trim());
+    if (isNaN(number) || number < 1 || number > expected.movies.length) {
+      return conn.sendMessage(msg.key.remoteJid, { text: `❗ Please reply with a number between 1 and ${expected.movies.length}.` }, { quoted: msg });
+    }
+
+    const selectedMovie = expected.movies[number - 1];
+    const downloadURL = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(selectedMovie.link)}`;
+
+    const { data } = await axios.get(downloadURL);
+    if (!data.status) {
+      return conn.sendMessage(msg.key.remoteJid, { text: "❌ Could not retrieve download info." }, { quoted: msg });
+    }
+
+    const dl = data.result;
+
+    let dlMsg = `🎬 *${dl.title}*\n\n`;
+    dlMsg += `📦 Size: ${dl.size}\n`;
+    dlMsg += `👤 Author: ${dl.author}\n`;
+    dlMsg += `👁️ Views: ${dl.view}\n`;
+    dlMsg += `📥 Download Link: ${dl.dl_link}`;
+
+    await conn.sendMessage(msg.key.remoteJid, { text: dlMsg }, { quoted: msg });
+
+    clearTimeout(expected.timeout);
+    delete zoomReplyMap[sender];
+
+  } catch (err) {
+    console.error("Zoom reply handler error:", err);
+  }
+};
