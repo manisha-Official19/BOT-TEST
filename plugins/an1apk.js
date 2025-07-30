@@ -4,7 +4,7 @@ const path = require("path");
 const { cmd, commands } = require('../command')
   
 cmd({  
-  pattern: "an1apk"
+  pattern: "an1apk",
   react: "📦",  
   desc: "Search and get APK details and download link from an1.com",  
   category: "download",  
