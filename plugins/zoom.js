@@ -1,17 +1,16 @@
 const axios = require("axios");
-const { cmd } = require("../command"); // Adjust this to your command system
+const { cmd } = require("../command");
 
 cmd({
   pattern: "zoom",
   react: "🔍",
-  desc: "Search movies from Zoom.lk and get download links",
+  desc: "Search Zoom.lk movies and get download links",
   category: "download",
-  use: "zoom <search term>",
-  filename: __filename,
+  use: "zoom <movie name>",
+  filename: __filename
 }, async (conn, m, store, { from, args, reply }) => {
   try {
-    if (!args.length)
-      return reply("❗ Please provide a search term. Example: `.zoom avatar`");
+    if (!args.length) return reply("❗ Please provide a search term.\nExample: `zoom Avatar`");
 
     const searchText = encodeURIComponent(args.join(" "));
     const searchApiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/search?text=${searchText}`;
@@ -20,32 +19,28 @@ cmd({
     const result = searchResponse.data;
 
     if (!result.status || !result.result.data.length) {
-      return reply("🔍 No results found for your search.");
+      return reply("❌ No movies found for your search.");
     }
 
-    const movies = result.result.data.slice(0, 5); // limit to 5 results
+    const firstMovie = result.result.data[0];
 
-    let fullMessage = `🎬 *Zoom.lk Search Results for:* ${args.join(" ")}\n\n`;
+    // Now fetch the download link for the top result
+    const downloadUrlApi = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(firstMovie.link)}`;
+    const downloadResponse = await axios.get(downloadUrlApi);
 
-    for (const movie of movies) {
-      const downloadApiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(movie.link)}`;
+    if (!downloadResponse.data.status) return reply("⚠️ Download details not available.");
 
-      const downloadResponse = await axios.get(downloadApiUrl);
-      if (!downloadResponse.data.status) continue;
+    const dl = downloadResponse.data.result;
 
-      const dl = downloadResponse.data.result;
+    let downloadMsg = `🎬 *${dl.title}*\n\n`;
+    downloadMsg += `📦 Size: ${dl.size}\n`;
+    downloadMsg += `👤 Author: ${dl.author}\n`;
+    downloadMsg += `👁️ Views: ${dl.view}\n`;
+    downloadMsg += `🔗 Download Link: ${dl.dl_link}`;
 
-      fullMessage += `🔹 *${dl.title}*\n`;
-      fullMessage += `📦 Size: ${dl.size}\n`;
-      fullMessage += `👤 Author: ${dl.author}\n`;
-      fullMessage += `👁️ Views: ${dl.view}\n`;
-      fullMessage += `🔗 Download: ${dl.dl_link}\n\n`;
-    }
-
-    await conn.sendMessage(m.chat, { text: fullMessage.trim() }, { quoted: m });
-
+    await reply(downloadMsg);
   } catch (err) {
     console.error(err);
-    reply("❌ An error occurred. Please try again later.");
+    reply("⚠️ Error occurred while processing your request. Try again later.");
   }
 });
