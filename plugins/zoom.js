@@ -1,5 +1,11 @@
 const axios = require("axios");
-const { cmd } = require('../command');
+const { cmd } = require("../command"); // ඔයාගේ command loader අනුව adjust කරන්න
+
+// Cache for storing movies per chat (key = chat id)
+const movieCache = new Map();
+
+// To track sent message keys per chat, to check reply stanzaId
+const sentMessages = new Map();
 
 cmd({
   pattern: "zoom",
@@ -7,80 +13,121 @@ cmd({
   desc: "Search Zoom.lk movies and get download links",
   category: "download",
   use: "zoom <search term>",
-  filename: __filename
-}, async (conn, m, store, { from, args, reply, sendMessage, ev }) => {
+  filename: __filename,
+}, async (conn, m, store, { from, args, reply }) => {
   try {
-    if (!args.length) return reply("Please provide a search term, e.g., zoom deadpool");
+    if (!args.length)
+      return reply("Please provide a search term, e.g., zoom dragonkeeper");
 
     const searchText = encodeURIComponent(args.join(" "));
-    const searchApiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/search?text=${searchText}`;
+    const searchapiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/search?text=${searchText}`;
 
-    // Step 1: Search movies
-    const searchRes = await axios.get(searchApiUrl);
-    if (!searchRes.data.status || !searchRes.data.result.length) {
-      return reply("No movies found for that search term.");
+    const searchResponse = await axios.get(searchapiUrl);
+    const result = searchResponse.data;
+
+    if (!result.status || !result.result.data.length) {
+      return reply("No results found for your search.");
     }
 
-    const movies = searchRes.data.result;
+    const movies = result.result.data;
 
-    // Prepare a numbered list of titles to send to user
-    let messageText = `Search results for *${args.join(" ")}*:\n\n`;
-    movies.forEach((movie, index) => {
-      messageText += `*${index + 1}.* ${movie.title}\n`;
+    let message = `📽️ *Search results for:* ${args.join(" ")}\n\n`;
+    movies.forEach((movie, i) => {
+      message += `*${i + 1}.* ${movie.title}\n`;
+      message += `${movie.desc.trim().slice(0, 100)}...\n`;
+      message += `[Link](${movie.link})\n\n`;
     });
-    messageText += `\nReply with the number of the movie you want to download.`;
+    message +=
+      "Reply *to this message* with the number to get the download link.";
 
-    // Send the list and save the message id for listening replies
-    const sentMsg = await sendMessage(from, { text: messageText }, { quoted: m });
+    // Send message and save sent message key for reply tracking
+    const sentMsg = await conn.sendMessage(
+      m.chat,
+      { text: message, mentions: [m.sender] },
+      { quoted: m }
+    );
 
-    // Step 2: Listen for user's reply to select movie
-    const handler = async (update) => {
-      const msg = update.messages[0];
-      if (!msg.message || !msg.key.remoteJid || msg.key.remoteJid !== from) return;
-      if (!msg.message.extendedTextMessage) return;
-
-      // Only proceed if this is a reply to the movie list message
-      if (msg.message.extendedTextMessage.contextInfo?.stanzaId === sentMsg.key.id) {
-        const choice = msg.message.extendedTextMessage.text.trim();
-        const choiceNum = parseInt(choice);
-        if (!choiceNum || choiceNum < 1 || choiceNum > movies.length) {
-          await sendMessage(from, { text: "Invalid choice. Please reply with a valid number from the list." });
-          return;
-        }
-
-        const selectedMovie = movies[choiceNum - 1];
-
-        // Step 3: Get movie download info
-        const downloadApiUrl = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(selectedMovie.link)}`;
-        const dlRes = await axios.get(downloadApiUrl);
-
-        if (!dlRes.data.status || !dlRes.data.result?.dl_link) {
-          await sendMessage(from, { text: "Sorry, couldn't get download link for that movie." });
-          return;
-        }
-
-        const dlInfo = dlRes.data.result;
-
-        // Reply with download details
-        let dlMessage = `*${dlInfo.title}*\n`;
-        dlMessage += `Author: ${dlInfo.author}\n`;
-        dlMessage += `Views: ${dlInfo.view || "N/A"}\n`;
-        dlMessage += `Date: ${dlInfo.date || "N/A"}\n`;
-        dlMessage += `Size: ${dlInfo.size || "N/A"}\n\n`;
-        dlMessage += `Download Link: ${dlInfo.dl_link}`;
-
-        await sendMessage(from, { text: dlMessage });
-
-        // Remove listener after done
-        ev.off("messages.upsert", handler);
-      }
-    };
-
-    // Register listener
-    ev.on("messages.upsert", handler);
+    // Save movies list & sent message key for this chat
+    movieCache.set(m.chat, movies);
+    sentMessages.set(m.chat, sentMsg);
 
   } catch (error) {
     console.error(error);
-    reply("Error occurred while searching Zoom.lk movies.");
+    reply("❌ Please try again later.");
+  }
+});
+
+// Listen for replies to the sent movie list messages
+// messageHandler.ev is your Baileys event emitter for messages
+messageHandler.ev.on("messages.upsert", async (update) => {
+  try {
+    const message = update.messages[0];
+
+    if (
+      !message.message ||
+      !message.message.extendedTextMessage ||
+      !message.key.fromMe // ignore our own messages
+    )
+      return;
+
+    const replyText = message.message.extendedTextMessage.text.trim();
+    const contextInfo = message.message.extendedTextMessage.contextInfo;
+
+    if (!contextInfo) return;
+
+    // Get the original sent message for this chat to check reply stanzaId
+    const sentMsg = sentMessages.get(message.key.remoteJid);
+    if (!sentMsg) return;
+
+    // Check if this message is a reply to the zoom movie list message
+    if (contextInfo.stanzaId !== sentMsg.key.id) return;
+
+    // Get cached movies for this chat
+    const movies = movieCache.get(message.key.remoteJid);
+    if (!movies) return;
+
+    // Validate user reply number
+    const selectedIndex = parseInt(replyText, 10) - 1;
+    if (isNaN(selectedIndex) || selectedIndex < 0 || selectedIndex >= movies.length) {
+      await conn.sendMessage(
+        message.key.remoteJid,
+        { text: "Invalid selection, please reply with a valid number." },
+        { quoted: message }
+      );
+      return;
+    }
+
+    const selectedMovie = movies[selectedIndex];
+
+    // Fetch download info
+    const downloadUrlApi = `https://nethu-api-ashy.vercel.app/movie/zoom/movie?url=${encodeURIComponent(
+      selectedMovie.link
+    )}`;
+
+    const downloadResponse = await axios.get(downloadUrlApi);
+    if (!downloadResponse.data.status) {
+      await conn.sendMessage(
+        message.key.remoteJid,
+        { text: "Download info not found." },
+        { quoted: message }
+      );
+      return;
+    }
+
+    const dl = downloadResponse.data.result;
+
+    let downloadMsg = `🎬 *${dl.title}*\n\n`;
+    downloadMsg += `📦 Size: ${dl.size}\n`;
+    downloadMsg += `👤 Author: ${dl.author}\n`;
+    downloadMsg += `👁️ Views: ${dl.view}\n`;
+    downloadMsg += `🔗 Download Link: ${dl.dl_link}\n`;
+
+    await conn.sendMessage(
+      message.key.remoteJid,
+      { text: downloadMsg },
+      { quoted: message }
+    );
+  } catch (err) {
+    console.error(err);
   }
 });
